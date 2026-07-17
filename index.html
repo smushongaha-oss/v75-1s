@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>V75 Triple-Screen Signal Generator</title>
+<title>V75 Accumulator Signal</title>
 <style>
   :root{
     --bg:#0b0e12; --panel:#12161c; --panel2:#171c24; --border:#232a35;
@@ -32,11 +32,16 @@
   .badge.buy{background:rgba(31,191,117,0.15);color:var(--green);}
   .badge.sell{background:rgba(226,80,74,0.15);color:var(--red);}
   .badge.flat{background:rgba(139,147,163,0.15);color:var(--muted);}
+  .badge.warn{background:rgba(226,168,58,0.15);color:var(--amber);}
   .levels-row{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);font-size:13px;}
   .levels-row:last-child{border-bottom:none;}
   .levels-row .k{color:var(--muted);}
   .bar-track{height:6px;background:var(--panel2);border-radius:3px;overflow:hidden;margin-top:6px;}
   .bar-fill{height:100%;border-radius:3px;transition:width .3s;}
+  .rate-pills{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;}
+  .pill{font-size:12px;padding:6px 10px;border-radius:8px;background:var(--panel2);color:var(--muted);border:1px solid var(--border);}
+  .pill.active{background:rgba(63,208,201,0.15);color:var(--accent);border-color:var(--accent);font-weight:600;}
+  .note{font-size:11px;color:var(--muted);margin-top:10px;line-height:1.5;}
   footer{font-size:11px;color:var(--muted);text-align:center;margin-top:8px;}
   .refresh{font-size:11px;color:var(--muted);cursor:pointer;text-decoration:underline;}
 </style>
@@ -45,8 +50,8 @@
 <div class="wrap">
   <div class="row" style="margin-bottom:14px;">
     <div>
-      <h1>V75 triple-screen signal</h1>
-      <p class="sub">Volatility 75 Index — H4 → M15 → M5 confluence</p>
+      <h1>V75 accumulator signal</h1>
+      <p class="sub">Volatility 75 Index — regime + growth-rate guide</p>
     </div>
     <div class="status"><span class="dot" id="dot"></span><span id="statusText">connecting…</span></div>
   </div>
@@ -80,11 +85,27 @@
   </div>
 
   <div class="card">
-    <div class="sub" style="margin:0 0 8px;">Suggested levels (ATR-based, M5)</div>
-    <div class="levels-row"><span class="k">Entry</span><span id="lvEntry">—</span></div>
-    <div class="levels-row"><span class="k">Stop loss (1.5× ATR)</span><span id="lvSL">—</span></div>
-    <div class="levels-row"><span class="k">Take profit (2R)</span><span id="lvTP">—</span></div>
-    <div class="levels-row"><span class="k">ATR(14) M5</span><span id="lvATR">—</span></div>
+    <div class="row">
+      <div class="sub" style="margin:0;">Volatility regime (M1, 20-candle)</div>
+      <div id="regimeBadge" class="badge flat">—</div>
+    </div>
+    <div class="levels-row"><span class="k">Avg range per candle</span><span id="volPct">—</span></div>
+    <div class="levels-row"><span class="k">ATR(14) M1</span><span id="atrM1">—</span></div>
+    <div class="note">Accumulators have no stop loss — the contract knocks out the instant price exits the barrier for your chosen growth rate. Regime here estimates how "quiet" price has been, which is what actually determines survival time, not direction.</div>
+  </div>
+
+  <div class="card">
+    <div class="sub" style="margin:0 0 4px;">Suggested growth rate</div>
+    <div class="rate-pills" id="ratePills">
+      <span class="pill" data-rate="1">1%</span>
+      <span class="pill" data-rate="2">2%</span>
+      <span class="pill" data-rate="3">3%</span>
+      <span class="pill" data-rate="4">4%</span>
+      <span class="pill" data-rate="5">5%</span>
+    </div>
+    <div class="levels-row" style="margin-top:10px;"><span class="k">Entry timing</span><span id="entryTiming">—</span></div>
+    <div class="levels-row"><span class="k">Suggested take-profit</span><span id="suggestTP">—</span></div>
+    <div class="note">Lower growth rate = wider knockout barrier = survives more noise, smaller payout per tick. Higher growth rate = narrower barrier = bigger payout per tick, breaches faster in choppy conditions. This is a heuristic from recent volatility, not Deriv's exact barrier table — always check the barrier shown in-app before confirming.</div>
   </div>
 
   <div class="card">
@@ -99,16 +120,17 @@
 
   <footer>
     Live via Deriv WebSocket (R_75) · <span class="refresh" id="refreshBtn">refresh now</span><br>
-    Signal only — not financial advice. No auto-execution.
+    Signal only — not financial advice. No auto-execution. Accumulators carry knockout risk regardless of direction.
   </footer>
 </div>
 
 <script>
 const APP_ID = 1089; // Deriv public demo app_id
 const SYMBOL = 'R_75';
-const TIMEFRAMES = { H4: 14400, M15: 900, M5: 300 };
+const TIMEFRAMES = { H4: 14400, M15: 900, M5: 300, M1: 60 };
+const REQ_IDS = { H4: 1, M15: 2, M5: 3, M1: 4 };
 let ws;
-const candleStore = {}; // { H4: [...], M15: [...], M5: [...] }
+const candleStore = {};
 let lastPrice = null;
 
 function setStatus(text, cls){
@@ -139,13 +161,14 @@ function requestCandles(tf, granularity){
     start: 1,
     style: 'candles',
     granularity,
-    req_id: tf === 'H4' ? 1 : tf === 'M15' ? 2 : 3
+    req_id: REQ_IDS[tf]
   }));
 }
 
 function handleMessage(data){
   if (data.msg_type === 'candles') {
-    const tf = data.echo_req.req_id === 1 ? 'H4' : data.echo_req.req_id === 2 ? 'M15' : 'M5';
+    const idToTf = Object.fromEntries(Object.entries(REQ_IDS).map(([k,v]) => [v,k]));
+    const tf = idToTf[data.echo_req.req_id];
     candleStore[tf] = data.candles.map(c => ({
       epoch: c.epoch, open: +c.open, high: +c.high, low: +c.low, close: +c.close
     }));
@@ -255,6 +278,24 @@ function badgeFor(score){
 
 function fmt(v, d=2){ return v == null || isNaN(v) ? '—' : v.toFixed(d); }
 
+// ---- volatility regime + growth-rate heuristic ----
+function volatilityStats(candles){
+  if (!candles || candles.length < 20) return null;
+  const recent = candles.slice(-20);
+  const avgRangePct = recent.reduce((sum, c) => sum + ((c.high - c.low) / c.close) * 100, 0) / recent.length;
+  const atrVal = atr(candles);
+  return { avgRangePct, atrVal };
+}
+
+function regimeFor(avgRangePct){
+  if (avgRangePct == null) return { cls: 'flat', label: 'no data', rate: null };
+  if (avgRangePct < 0.05) return { cls: 'buy', label: 'calm', rate: 5 };
+  if (avgRangePct < 0.10) return { cls: 'buy', label: 'calm-normal', rate: 4 };
+  if (avgRangePct < 0.18) return { cls: 'flat', label: 'normal', rate: 3 };
+  if (avgRangePct < 0.30) return { cls: 'warn', label: 'choppy', rate: 2 };
+  return { cls: 'sell', label: 'very choppy', rate: 1 };
+}
+
 function runAnalysis(){
   const results = {};
   ['H4','M15','M5'].forEach(tf => { results[tf] = scoreTimeframe(candleStore[tf]); });
@@ -263,13 +304,13 @@ function runAnalysis(){
   document.getElementById('scoreM15').textContent = results.M15 ? fmt(results.M15.composite) : '—';
   document.getElementById('scoreM5').textContent = results.M5 ? fmt(results.M5.composite) : '—';
 
-  // overall = weighted: H4 gates direction, M15 confirms, M5 triggers
+  let overall = null;
   if (results.H4 && results.M15 && results.M5){
     const gate = results.H4.composite;
     const confirm = results.M15.composite;
     const trigger = results.M5.composite;
     const aligned = Math.sign(gate) === Math.sign(trigger) && Math.abs(gate) > 0.15;
-    const overall = (gate * 0.4 + confirm * 0.35 + trigger * 0.25) * (aligned ? 1 : 0.5);
+    overall = (gate * 0.4 + confirm * 0.35 + trigger * 0.25) * (aligned ? 1 : 0.5);
     const b = badgeFor(overall);
     const badgeEl = document.getElementById('overallBadge');
     badgeEl.className = 'badge ' + b.cls;
@@ -279,24 +320,42 @@ function runAnalysis(){
     barEl.style.width = pct + '%';
     barEl.style.background = b.cls === 'buy' ? 'var(--green)' : b.cls === 'sell' ? 'var(--red)' : 'var(--muted)';
 
-    // M5 factor breakdown
     document.getElementById('fRSI').textContent = fmt(results.M5.rsi, 1);
     document.getElementById('fMACD').textContent = results.M5.macd ? fmt(results.M5.macd.hist, 3) : '—';
     document.getElementById('fMA').textContent = results.M5.maFast > results.M5.maSlow ? 'bullish' : 'bearish';
     document.getElementById('fStoch').textContent = results.M5.stoch ? fmt(results.M5.stoch.k, 1) : '—';
+  }
 
-    // ATR-based levels off M5
-    const atrVal = atr(candleStore.M5);
-    const entry = candleStore.M5[candleStore.M5.length - 1].close;
-    if (atrVal != null){
-      const dir = overall >= 0 ? 1 : -1;
-      const sl = entry - dir * atrVal * 1.5;
-      const tp = entry + dir * atrVal * 3.0; // 2R since SL distance is 1.5 ATR
-      document.getElementById('lvEntry').textContent = fmt(entry);
-      document.getElementById('lvSL').textContent = fmt(sl);
-      document.getElementById('lvTP').textContent = fmt(tp);
-      document.getElementById('lvATR').textContent = fmt(atrVal, 3);
+  // volatility regime off M1
+  const vol = volatilityStats(candleStore.M1);
+  if (vol){
+    document.getElementById('volPct').textContent = fmt(vol.avgRangePct, 3) + '%';
+    document.getElementById('atrM1').textContent = fmt(vol.atrVal, 3);
+    const reg = regimeFor(vol.avgRangePct);
+    const regBadge = document.getElementById('regimeBadge');
+    regBadge.className = 'badge ' + reg.cls;
+    regBadge.textContent = reg.label;
+
+    document.querySelectorAll('#ratePills .pill').forEach(p => {
+      p.classList.toggle('active', reg.rate != null && +p.dataset.rate === reg.rate);
+    });
+
+    // entry timing: only "favorable" when regime is calm/normal AND trend score isn't screaming choppy reversal
+    const entryEl = document.getElementById('entryTiming');
+    if (reg.rate >= 3) {
+      entryEl.textContent = 'favorable — quiet conditions';
+      entryEl.style.color = 'var(--green)';
+    } else if (reg.rate === 2) {
+      entryEl.textContent = 'caution — elevated noise';
+      entryEl.style.color = 'var(--amber)';
+    } else {
+      entryEl.textContent = 'unfavorable — high knockout risk';
+      entryEl.style.color = 'var(--red)';
     }
+
+    // suggested take-profit: scale with regime (calmer = can hold for a bigger multiple before noise catches up)
+    const tpMultiple = { 5: '~8-12 ticks target', 4: '~6-9 ticks target', 3: '~4-6 ticks target', 2: '~2-4 ticks target, exit early', 1: 'avoid entering' };
+    document.getElementById('suggestTP').textContent = tpMultiple[reg.rate] || '—';
   }
 }
 
